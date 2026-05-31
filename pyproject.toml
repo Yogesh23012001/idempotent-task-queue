@@ -48,11 +48,10 @@ plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-addopts = "-v --cov=src --cov-report=term-missing"
+addopts = "-v --cov=task_queue --cov-report=term-missing"
 
 [project.scripts]
 taskq-worker = "task_queue.worker.runner:main"
 taskq-api = "task_queue.api.app:app"
 
-curl -s http://localhost:8001/tasks/2c36e47a-ea82-494a-acb4-54aebef75f36 | jq
 
