@@ -26,7 +26,7 @@ and full observability**.
 
 ## Architecture
 
-\`\`\`
+```
 ┌────────┐  POST /tasks         ┌────────────────┐
 │ Client │ ────────────────────▶│  FastAPI app   │
 └────────┘  Idempotency-Key:abc │  - validate    │
@@ -48,7 +48,7 @@ and full observability**.
                               │  - poll              │
                               │  - retry/dead-letter │
                               └──────────────────────┘
-\`\`\`
+```
 
 ## API surface
 
@@ -65,7 +65,7 @@ Auto-generated OpenAPI docs at `/docs` when running.
 
 ## Task lifecycle
 
-\`\`\`
+```
    ┌─── PENDING ◄─────────────┐
    │       │                  │
    ▼       │ (worker picks)   │ (retry within budget)
@@ -78,11 +78,11 @@ PROCESSING │                  │
            │ (attempts >= max_attempts)
            ▼
        DEAD_LETTER ◄── (POST /tasks/{id}/retry resets to PENDING with +3 max_attempts)
-\`\`\`
+```
 
 ## Quick start
 
-\`\`\`bash
+```bash
 # 1. Bring up Postgres, Prometheus, Jaeger
 docker compose up -d
 
@@ -108,7 +108,7 @@ curl -X POST http://localhost:8001/tasks \\
   -H "Content-Type: application/json" \\
   -H "Idempotency-Key: $(uuidgen)" \\
   -d '{"task_type":"send_email","payload":{"to":"a@example.com","subject":"hi"}}'
-\`\`\`
+```
 
 Available task types: `send_email`, `send_sms`, `webhook`, `always_fail` (test only).
 Add new handlers by writing an async function and registering it in
@@ -116,9 +116,9 @@ Add new handlers by writing an async function and registering it in
 
 ## Tests
 
-\`\`\`bash
+```bash
 uv run pytest
-\`\`\`
+```
 
 16 tests covering API endpoints, worker outcomes, and idempotency correctness.
 Coverage: 74% (see `coverage report` for line-by-line).
