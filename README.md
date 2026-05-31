@@ -94,7 +94,7 @@ uv run uvicorn task_queue.api.app:app --reload --app-dir src --port 8001
 
 # 4. Run the worker (terminal 2)
 uv run taskq-worker
-\`\`\`
+```
 
 UIs:
 - API docs: http://localhost:8001/docs
@@ -103,7 +103,7 @@ UIs:
 
 ## Submit a task
 
-\`\`\`bash
+```bash
 curl -X POST http://localhost:8001/tasks \\
   -H "Content-Type: application/json" \\
   -H "Idempotency-Key: $(uuidgen)" \\
