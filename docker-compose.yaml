@@ -17,5 +17,24 @@ services:
       timeout: 5s
       retries: 5
 
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: taskq_jaeger
+    ports:
+      - "16687:16686"     # Jaeger UI (different from python-learning's 16686)
+      - "4319:4317"       # OTLP gRPC
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    container_name: taskq_prometheus
+    ports:
+      - "9091:9090"       # Prometheus UI (different from python-learning's 9090)
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+
 volumes:
   taskq_pg_data:

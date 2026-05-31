@@ -17,6 +17,13 @@ from task_queue.worker.handlers import HandlerNotFoundError, get_handler
 
 logger = structlog.get_logger(__name__)
 
+import time
+from task_queue.observability.metrics import (
+    task_handler_duration_seconds,
+    tasks_processed_total,
+    worker_polls_total,
+)
+
 
 # ============================================================
 # The single-task pickup query
@@ -56,6 +63,9 @@ async def mark_succeeded(session: AsyncSession, task: Task, result: dict) -> Non
     task.status = TaskStatus.SUCCEEDED
     task.result = result
     task.last_error = None
+    tasks_processed_total.labels(
+        task_type=task.task_type, outcome="succeeded",
+    ).inc()
 
 
 async def mark_failed_or_retry(session: AsyncSession, task: Task, error: str) -> None:
@@ -63,6 +73,9 @@ async def mark_failed_or_retry(session: AsyncSession, task: Task, error: str) ->
     task.last_error = error
     if task.attempts >= task.max_attempts:
         task.status = TaskStatus.DEAD_LETTER
+        tasks_processed_total.labels(
+            task_type=task.task_type, outcome="dead_letter",
+        ).inc()
         logger.warning(
             "task_dead_lettered",
             task_id=str(task.id),
@@ -72,6 +85,9 @@ async def mark_failed_or_retry(session: AsyncSession, task: Task, error: str) ->
         )
     else:
         task.status = TaskStatus.PENDING  # back in queue for retry
+        tasks_processed_total.labels(
+            task_type=task.task_type, outcome="will_retry",
+        ).inc()
         logger.info(
             "task_will_retry",
             task_id=str(task.id),
@@ -96,11 +112,13 @@ async def process_one(factory: async_sessionmaker[AsyncSession]) -> bool:
     async with factory() as session:
         task = await claim_one_task(session)
         if task is None:
+            worker_polls_total.labels(outcome="empty").inc()
             return False
         await session.commit()
         # Refresh attributes now that the row is committed
         await session.refresh(task)
 
+    worker_polls_total.labels(outcome="claimed").inc()
     task_id = task.id
     task_type = task.task_type
     payload = task.payload
@@ -114,11 +132,13 @@ async def process_one(factory: async_sessionmaker[AsyncSession]) -> bool:
 
     # ---- Phase 2: run the handler OUTSIDE any DB transaction ----
     # We don't want long-running handlers holding DB connections.
+    handler_start = time.perf_counter()
     try:
         handler = get_handler(task_type)
         result = await handler(payload)
     except HandlerNotFoundError as e:
         # No handler for this task_type — terminal, dead-letter immediately
+        tasks_processed_total.labels(task_type=task_type, outcome="dead_letter").inc()
         async with factory() as session:
             db_task = await session.get(Task, task_id)
             if db_task is None:
@@ -155,6 +175,9 @@ async def process_one(factory: async_sessionmaker[AsyncSession]) -> bool:
         await session.commit()
     logger.info("task_succeeded", result_keys=list(result.keys()))
     structlog.contextvars.unbind_contextvars("task_id", "task_type", "attempt")
+    handler_duration = time.perf_counter() - handler_start
+    task_handler_duration_seconds.labels(task_type=task_type).observe(handler_duration)
+    tasks_processed_total.labels(task_type=task_type, outcome="succeeded").inc()
     return True
 
 

@@ -13,6 +13,19 @@ from fastapi import FastAPI, Request
 from task_queue.api.routes import router as tasks_router
 from task_queue.config import get_settings
 from task_queue.db.engine import make_engine, make_session_factory
+import time
+from collections.abc import Awaitable, Callable
+
+from fastapi import Request, Response
+from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, generate_latest
+from starlette.responses import Response as StarletteResponse
+
+from task_queue.observability.metrics import (
+    http_request_duration_seconds,
+    http_requests_in_flight,
+    http_requests_total,
+)
+
 
 
 def _configure_logging() -> None:
@@ -69,3 +82,39 @@ async def request_id_middleware(request: Request, call_next):
 
 
 app.include_router(tasks_router)
+
+
+@app.middleware("http")
+async def metrics_middleware(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    if request.url.path == "/metrics":
+        return await call_next(request)
+
+    http_requests_in_flight.inc()
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+        status = response.status_code
+    except Exception:
+        status = 500
+        raise
+    finally:
+        duration = time.perf_counter() - start
+        route = request.scope.get("route")
+        path = route.path if route is not None else request.url.path
+        http_requests_total.labels(
+            method=request.method, path=path, status=str(status),
+        ).inc()
+        http_request_duration_seconds.labels(
+            method=request.method, path=path,
+        ).observe(duration)
+        http_requests_in_flight.dec()
+
+    return response
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics_endpoint() -> StarletteResponse:
+    data = generate_latest(REGISTRY)
+    return StarletteResponse(content=data, media_type=CONTENT_TYPE_LATEST)

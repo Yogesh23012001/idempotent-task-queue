@@ -21,6 +21,8 @@ from task_queue.api.model import (
 from task_queue.config import get_settings
 from task_queue.db.models import IdempotencyKey, Task, TaskStatus
 
+from task_queue.observability.metrics import idempotency_events_total
+
 logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["tasks"])
 
@@ -86,6 +88,7 @@ async def create_task(
         if existing is not None:
             # 2a. Same key, same body → replay cached response
             if existing.request_hash == request_hash:
+                idempotency_events_total.labels(outcome="replay").inc()
                 logger.info(
                     "idempotent_replay",
                     idempotency_key=idempotency_key,
@@ -94,6 +97,7 @@ async def create_task(
                 return existing.response_body
 
             # 2b. Same key, DIFFERENT body → reject
+            idempotency_events_total.labels(outcome="mismatch").inc()
             logger.warning(
                 "idempotency_key_mismatch",
                 idempotency_key=idempotency_key,
@@ -131,13 +135,14 @@ async def create_task(
             expires_at=now + timedelta(seconds=settings.idempotency_ttl_seconds),
         )
         session.add(idem)
-
+        idempotency_events_total.labels(outcome="new").inc()
         # 6. Single commit — both task and idempotency record together
         try:
             await session.commit()
         except IntegrityError as e:
             # Race: another request raced us with the same key between
             # our SELECT and INSERT. Roll back and re-fetch the winner.
+            idempotency_events_total.labels(outcome="race").inc()
             await session.rollback()
             logger.warning(
                 "idempotency_race_detected", idempotency_key=idempotency_key,
@@ -159,6 +164,7 @@ async def create_task(
             task_type=task.task_type,
             idempotency_key=idempotency_key,
         )
+
         return response_body
 
 @router.get("/tasks/{task_id}", response_model=TaskResponse)
