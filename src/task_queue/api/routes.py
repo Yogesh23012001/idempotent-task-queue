@@ -19,7 +19,7 @@ from task_queue.api.model import (
     TaskResponse,
 )
 from task_queue.config import get_settings
-from task_queue.db.models import IdempotencyKey, Task
+from task_queue.db.models import IdempotencyKey, Task, TaskStatus
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["tasks"])
@@ -161,8 +161,98 @@ async def create_task(
         )
         return response_body
 
+@router.get("/tasks/{task_id}", response_model=TaskResponse)
+async def get_task(
+    factory: SessionFactoryDep,
+    task_id: Annotated[UUID, Path(description="Task UUID")],
+) -> Task:
+    """Retrieve a single task by ID."""
+    async with factory() as session:
+        result = await session.execute(select(Task).where(Task.id == task_id))
+        task = result.scalar_one_or_none()
+        if task is None:
+            raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+        return task
 
 def _utc_now_factory():
     """Local helper — imports stay clean."""
     from task_queue.db.models import _utc_now
     return _utc_now()
+
+from typing import Annotated
+from fastapi import Query
+
+
+@router.get("/tasks", response_model=TaskListResponse)
+async def list_tasks(
+    factory: SessionFactoryDep,
+    status_filter: Annotated[
+        TaskStatus | None,
+        Query(
+            alias="status",
+            description="Filter by task status",
+        ),
+    ] = None,
+    task_type: Annotated[
+        str | None,
+        Query(min_length=1, max_length=64, description="Filter by task type"),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> TaskListResponse:
+    """List tasks, newest first. Supports pagination and filtering."""
+    async with factory() as session:
+        stmt = select(Task).order_by(Task.created_at.desc())
+        if status_filter is not None:
+            stmt = stmt.where(Task.status == status_filter)
+        if task_type is not None:
+            stmt = stmt.where(Task.task_type == task_type)
+
+        # Apply pagination
+        stmt = stmt.limit(limit).offset(offset)
+
+        result = await session.execute(stmt)
+        items = list(result.scalars().all())
+        return TaskListResponse(items=items, count=len(items))   # type: ignore[arg-type]
+
+@router.post("/tasks/{task_id}/retry", response_model=TaskResponse)
+async def retry_task(
+    factory: SessionFactoryDep,
+    task_id: Annotated[UUID, Path()],
+) -> Task:
+    """Reset a failed task to pending so the worker re-attempts it.
+
+    Only valid for tasks in FAILED or DEAD_LETTER status.
+    """
+    async with factory() as session:
+        result = await session.execute(select(Task).where(Task.id == task_id))
+        task = result.scalar_one_or_none()
+        if task is None:
+            raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+
+        if task.status not in {TaskStatus.FAILED, TaskStatus.DEAD_LETTER}:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"cannot retry task in status={task.status.value}; "
+                    f"only FAILED or DEAD_LETTER tasks can be retried"
+                ),
+            )
+
+        # Reset state for re-processing
+        task.status = TaskStatus.PENDING
+        task.last_error = None
+        # Note: we DO NOT reset attempts — we want the history.
+        # We bump max_attempts so the worker has fresh retries budget.
+        task.max_attempts += 3
+
+        await session.commit()
+        await session.refresh(task)
+
+        logger.info(
+            "task_manually_retried",
+            task_id=str(task.id),
+            attempts=task.attempts,
+            new_max_attempts=task.max_attempts,
+        )
+        return task
